@@ -2,8 +2,6 @@
 
 namespace OfxParser;
 
-use SimpleXMLElement;
-
 /**
  * An OFX parser library
  *
@@ -16,21 +14,11 @@ use SimpleXMLElement;
 class Parser
 {
     /**
-     * Factory to extend support for OFX document structures.
-     * @param SimpleXMLElement $xml
-     * @return Ofx
-     */
-    protected function createOfx(SimpleXMLElement $xml)
-    {
-        return new Ofx($xml);
-    }
-
-    /**
      * Load an OFX file into this parser by way of a filename
      *
      * @param string $ofxFile A path that can be loaded with file_get_contents
      * @return Ofx
-     * @throws \InvalidArgumentException
+     * @throws \Exception
      */
     public function loadFromFile($ofxFile)
     {
@@ -46,52 +34,40 @@ class Parser
      *
      * @param string $ofxContent
      * @return  Ofx
+     * @throws \Exception
      */
     public function loadFromString($ofxContent)
     {
-        $ofxContent = str_replace(["\r\n", "\r"], "\n", $ofxContent);
         $ofxContent = utf8_encode($ofxContent);
-
         $sgmlStart = stripos($ofxContent, '<OFX>');
-        $ofxHeader =  trim(substr($ofxContent, 0, $sgmlStart));
-        $header = $this->parseHeader($ofxHeader);
+        $ofxSgml = trim($this->normalizeNewlines(substr($ofxContent, $sgmlStart)));
 
-        $ofxSgml = trim(substr($ofxContent, $sgmlStart));
-        if (stripos($ofxHeader, '<?xml') === 0) {
-            $ofxXml = $ofxSgml;
-        } else {
-            $ofxSgml = $this->conditionallyAddNewlines($ofxSgml);
-            $ofxXml = $this->convertSgmlToXml($ofxSgml);
-        }
+        $ofxXml = $this->convertSgmlToXml($ofxSgml);
 
         $xml = $this->xmlLoadString($ofxXml);
 
-        $ofx = $this->createOfx($xml);
-        $ofx->buildHeader($header);
-
-        return $ofx;
+        return new Ofx($xml);
     }
 
     /**
-     * Detect if the OFX file is on one line. If it is, add newlines automatically.
+     * Normalize newlines by removing and adding newlines only before opening tags
      *
      * @param string $ofxContent
      * @return string
      */
-    private function conditionallyAddNewlines($ofxContent)
+    private function normalizeNewlines($ofxContent)
     {
-        if (preg_match('/<OFX>.*<\/OFX>/', $ofxContent) === 1) {
-            return str_replace('<', "\n<", $ofxContent); // add line breaks to allow XML to parse
-        }
-
-        return $ofxContent;
+        // clear all new line characters first
+        $ofxContent = str_replace(["\r", "\n"], '', $ofxContent);
+        // add line breaks before opening tags only, to allow XML to parse
+        return preg_replace('/<[^\/!]/', "\n" . '$0', $ofxContent);
     }
 
     /**
      * Load an XML string without PHP errors - throws exception instead
      *
      * @param string $xmlString
-     * @throws \RuntimeException
+     * @throws \Exception
      * @return \SimpleXMLElement
      */
     private function xmlLoadString($xmlString)
@@ -115,63 +91,22 @@ class Parser
      */
     private function closeUnclosedXmlTags($line)
     {
-        // Special case discovered where empty content tag wasn't closed
         $line = trim($line);
-        if (preg_match('/<MEMO>$/', $line) === 1) {
-            return '<MEMO></MEMO>';
+        $tag = ltrim(substr($line, 1, strpos($line, '>') - 1), '/');
+
+        // Line is "<SOMETHING>" or "</SOMETHING>"
+        if ($line === '<' . $tag . '>' || $line === '</' . $tag . '>') {
+            return $line;
         }
 
-        // Matches: <SOMETHING>blah
-        // Does not match: <SOMETHING>
-        // Does not match: <SOMETHING>blah</SOMETHING>
-        if (preg_match(
-            "/<([A-Za-z0-9.]+)>([\wà-úÀ-Ú0-9\.\-\_\+\, ;:\[\]\'\&\/\\\*\(\)\+\{\|\}\!\£\$\?=@€£#%±§~`\"]+)$/",
-            $line,
-            $matches
-        )) {
-            return "<{$matches[1]}>{$matches[2]}</{$matches[1]}>";
-        }
-        return $line;
-    }
-
-    /**
-     * Parse the SGML Header to an Array
-     *
-     * @param string $ofxHeader
-     * @param int $sgmlStart
-     * @return array
-     */
-    private function parseHeader($ofxHeader)
-    {
-        $header = [];
-
-
-        $ofxHeader = trim($ofxHeader);
-        // Remove empty new lines.
-        $ofxHeader = preg_replace('/^\n+/m', '', $ofxHeader);
-
-        // Check if it's an XML file (OFXv2)
-        if(preg_match('/^<\?xml/', $ofxHeader) === 1) {
-            // Only parse OFX headers and not XML headers.
-            $ofxHeader = preg_replace('/<\?xml .*?\?>\n?/', '', $ofxHeader);
-            $ofxHeader = preg_replace(['/"/', '/\?>/', '/<\?OFX/i'], '', $ofxHeader);
-            $ofxHeaderLine = explode(' ', trim($ofxHeader));
-
-            foreach ($ofxHeaderLine as $value) {
-                $tag = explode('=', $value);
-                $header[$tag[0]] = $tag[1];
-            }
-
-            return $header;
+        // Tag is properly closed
+        if (strpos($line, '</' . $tag . '>') !== false) {
+            return $line;
         }
 
-        $ofxHeaderLines = explode("\n", $ofxHeader);
-        foreach ($ofxHeaderLines as $value) {
-            $tag = explode(':', $value);
-            $header[$tag[0]] = $tag[1];
-        }
-
-        return $header;
+        $lines = explode("\n", str_replace('</', "\n" . '</', $line));
+        $lines[0] = trim($lines[0]) . '</' . $tag .'>';
+        return implode('', $lines);
     }
 
     /**
@@ -182,32 +117,11 @@ class Parser
      */
     private function convertSgmlToXml($sgml)
     {
-        $sgml = preg_replace('/&(?!#?[a-z0-9]+;)/', '&amp;', $sgml);
-
-        $lines = explode("\n", $sgml);
-        $tags = [];
-
-        foreach ($lines as $i => &$line) {
-            $line = trim($this->closeUnclosedXmlTags($line)) . "\n";
-
-            // Matches tags like <SOMETHING> or </SOMETHING>
-            if (!preg_match("/^<(\/?[A-Za-z0-9.]+)>$/", trim($line), $matches)) {
-                continue;
-            }
-
-            // If matches </SOMETHING>, looks back and replaces all tags like
-            // <OTHERTHING> to <OTHERTHING/> until finds the opening tag <SOMETHING>
-            if ($matches[1][0] == '/') {
-                $tag = substr($matches[1], 1);
-
-                while (($last = array_pop($tags)) && $last[1] != $tag) {
-                    $lines[$last[0]] = "<{$last[1]}/>";
-                }
-            } else {
-                $tags[] = [$i, $matches[1]];
-            }
+        $xml = '';
+        foreach (explode("\n", $sgml) as $line) {
+            $xml .= $this->closeUnclosedXmlTags($line) . "\n";
         }
 
-        return implode("\n", array_map('trim', $lines));
+        return rtrim($xml);
     }
 }
